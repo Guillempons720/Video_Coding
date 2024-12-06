@@ -1,10 +1,12 @@
 from typing import Union, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse
+import tempfile
 import os
 import ffmpeg
 from pydantic import BaseModel
 from typing import List
+from collections import Counter
 
 
 class Translator:
@@ -219,6 +221,10 @@ async def create_bbb_container(file: UploadFile = File(...), path_file: str = Fo
     output_ac3 = "output_bbb_ac3.ac3"
     final_output = path_file
     
+    output_dir = os.path.dirname(final_output)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+    
     with open(temp_video, "wb") as f:
         f.write(await file.read())
     
@@ -232,3 +238,103 @@ async def create_bbb_container(file: UploadFile = File(...), path_file: str = Fo
                 os.remove(file_path)
 
     return {"message": "BBB container created successfully", "output_file": final_output}
+
+
+@app.post("/get_tracks/")
+async def get_tracks(file: UploadFile = File(...)):
+    file_location = f"temp_{file.filename}"
+    with open(file_location, "wb") as f:
+        f.write(await file.read())
+    
+    try:
+        probe = ffmpeg.probe(file_location)
+        streams = probe.get("streams", [])
+        
+        track_counts = {
+            "video": 0,
+            "audio": 0,
+            "subtitle": 0,
+            "data": 0,
+            "unknown": 0,
+        }
+        
+        for stream in streams:
+            codec_type = stream.get("codec_type", "unknown")
+            if codec_type in track_counts:
+                track_counts[codec_type] += 1
+            else:
+                track_counts["unknown"] += 1
+        
+        return {"track_counts": track_counts, "total_tracks": len(streams)}
+    except ffmpeg.Error as e:
+        error_message = e.stderr.decode("utf-8")
+        raise HTTPException(status_code=500, detail=f"FFmpeg erro: { error_message}")
+    
+    finally:
+        if os.path.exists(file_location):
+            os.remove(file_location)
+
+
+@app.post("/visualize_motion_vectors/")
+async def visualize_motion_vectors(file: UploadFile = File(...), output_path: str = Form(...)):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as temp_file:
+        temp_file_path = temp_file.name
+
+    try:
+        with open(temp_file_path, "wb") as f:
+            f.write(await file.read())
+        
+        (
+            ffmpeg
+            .input(temp_file_path)
+            .output(
+                output_path,
+                vf="codecview=mv=1:qp=1",
+                vcodec="libx264",
+                preset="fast",
+                crf=18
+            )
+            .run(overwrite_output=True)
+        )
+
+    except ffmpeg.Error as e:
+        error_message = e.stderr.decode("utf-8") if e.stderr else "Unknown FFmpeg error occurred"
+        raise HTTPException(status_code=500, detail=f"FFmpeg error: {error_message}")
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+    return {"message": "Motion vectors visualization complete", "output_file": output_path}
+
+
+@app.post("/visualize_yuv_histogram/")
+async def visualize_yuv_histogram(file: UploadFile = File(...), output_path: str = Form(...)):
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as temp_file:
+        temp_file_path = temp_file.name
+
+    try:
+        with open(temp_file_path, "wb") as f:
+            f.write(await file.read())
+
+        (
+            ffmpeg
+            .input(temp_file_path)
+            .output(
+                output_path,
+                vf="format=yuv444p,histogram",
+                vcodec="libx264",
+                preset="fast",
+                crf=18
+            )
+            .run(overwrite_output=True)
+        )
+    except ffmpeg.Error as e:
+        error_message = e.stderr.decode("utf-8") if e.stderr else "Unknown FFmpeg error occurred"
+        raise HTTPException(status_code=500, detail=f"FFmpeg error: {error_message}")
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+    return {"message": "YUV histogram visualization complete", "output_file": output_path}
